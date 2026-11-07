@@ -35,6 +35,26 @@ jobs:
         run: |
           echo "::warning::SIGNKEY is not configured. The feed index will be unsigned and OpenWrt will reject it."
 
+      - name: Validate signing key
+        if: env.HAS_SIGNKEY == 'true'
+        env:
+          SIGNKEY: ${{ secrets.SIGNKEY }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="$RUNNER_TEMP/feed-signing-key.pem"
+          # Write the secret exactly as gh-action-sdk does, then verify that
+          # OpenSSL can load it. This catches mangled secrets (e.g. literal
+          # "\n" sequences instead of real line breaks) before the SDK build.
+          printf '%s\n' "$SIGNKEY" > "$KEY_FILE"
+          if ! openssl ec -in "$KEY_FILE" -check -noout; then
+            echo "::error::SIGNKEY is not a valid unencrypted EC private key in PEM format."
+            echo "Re-create the secret from the key file, for example:"
+            echo "  gh secret set SIGNKEY < private-key.pem"
+            exit 1
+          fi
+          openssl ec -in "$KEY_FILE" -pubout -out openwrt-daxcore.pem
+          rm -f "$KEY_FILE"
+
       # The LuCI feed (and therefore luci.mk) comes from the SDK's default
       # feeds.conf.default; gh-action-sdk runs `feeds update -a` and rewrites
       # the git.openwrt.org URLs to GitHub. Do not add luci via EXTRA_FEEDS:
@@ -66,13 +86,6 @@ jobs:
           PKG_VERSION="${PKG_BASENAME#luci-app-acme-}"
           echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
           echo "Built luci-app-acme version: $PKG_VERSION"
-
-      - name: Extract public key from signing key
-        if: env.HAS_SIGNKEY == 'true'
-        env:
-          SIGNKEY: ${{ secrets.SIGNKEY }}
-        run: |
-          printf '%s\n' "$SIGNKEY" | openssl ec -pubout -out openwrt-daxcore.pem
 
       - name: Upload packages
         uses: actions/upload-artifact@v7
