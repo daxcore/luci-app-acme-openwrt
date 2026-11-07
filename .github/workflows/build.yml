@@ -60,7 +60,8 @@ jobs:
       # the git.openwrt.org URLs to GitHub. Do not add luci via EXTRA_FEEDS:
       # that would define the feed twice and scripts/feeds rejects duplicates.
       - name: Build package for OpenWRT
-        uses: openwrt/gh-action-sdk@main
+        # uses: openwrt/gh-action-sdk@main
+        uses: daxcore/gh-action-sdk@0605107170683af54a569516b799812825157c30
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.release }}
           PACKAGES: luci-app-acme
