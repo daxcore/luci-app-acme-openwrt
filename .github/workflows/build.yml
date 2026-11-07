@@ -10,8 +10,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      HAS_SIGNKEY: ${{ secrets.SIGNKEY != '' }}
 
     strategy:
       fail-fast: true
@@ -30,38 +28,12 @@ jobs:
           # make that version fall back to "0".
           fetch-depth: 0
 
-      - name: Check signing key
-        if: env.HAS_SIGNKEY != 'true'
-        run: |
-          echo "::warning::SIGNKEY is not configured. The feed index will be unsigned and OpenWrt will reject it."
-
-      - name: Validate signing key
-        if: env.HAS_SIGNKEY == 'true'
-        env:
-          SIGNKEY: ${{ secrets.SIGNKEY }}
-        run: |
-          set -euo pipefail
-          KEY_FILE="$RUNNER_TEMP/feed-signing-key.pem"
-          # Write the secret exactly as gh-action-sdk does, then verify that
-          # OpenSSL can load it. This catches mangled secrets (e.g. literal
-          # "\n" sequences instead of real line breaks) before the SDK build.
-          printf '%s\n' "$SIGNKEY" > "$KEY_FILE"
-          if ! openssl ec -in "$KEY_FILE" -check -noout; then
-            echo "::error::SIGNKEY is not a valid unencrypted EC private key in PEM format."
-            echo "Re-create the secret from the key file, for example:"
-            echo "  gh secret set SIGNKEY < private-key.pem"
-            exit 1
-          fi
-          openssl ec -in "$KEY_FILE" -pubout -out openwrt-daxcore.pem
-          rm -f "$KEY_FILE"
-
       # The LuCI feed (and therefore luci.mk) comes from the SDK's default
       # feeds.conf.default; gh-action-sdk runs `feeds update -a` and rewrites
       # the git.openwrt.org URLs to GitHub. Do not add luci via EXTRA_FEEDS:
       # that would define the feed twice and scripts/feeds rejects duplicates.
       - name: Build package for OpenWRT
-        # uses: openwrt/gh-action-sdk@main
-        uses: daxcore/gh-action-sdk@0605107170683af54a569516b799812825157c30
+        uses: daxcore/gh-action-sdk@main
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.release }}
           PACKAGES: luci-app-acme
@@ -97,20 +69,16 @@ jobs:
             bin/packages/**/action/packages.adb
             bin/packages/**/action/index.json
             openwrt-daxcore.pem
-          if-no-files-found: error
 
       - name: Deploy to GitHub Pages
         run: |
-          set -euo pipefail
           DEST="deploy/releases/${{ matrix.release }}/${{ matrix.arch }}"
-          mkdir -p "$DEST"
-          shopt -s globstar nullglob
-          cp bin/packages/**/action/luci-app-acme*.apk "$DEST/"
-          cp bin/packages/**/action/packages.adb "$DEST/"
-          cp bin/packages/**/action/index.json "$DEST/"
-          if [ -f openwrt-daxcore.pem ]; then
-            cp openwrt-daxcore.pem deploy/
-          fi
+          mkdir -p $DEST
+          shopt -s globstar
+          cp bin/packages/**/action/luci-app-acme*.apk $DEST/
+          cp bin/packages/**/action/packages.adb $DEST/
+          cp bin/packages/**/action/index.json $DEST/
+          cp openwrt-daxcore.pem deploy/
 
       - name: Push to Pages Branch
         uses: peaceiris/actions-gh-pages@v4
@@ -137,22 +105,12 @@ jobs:
         run: |
           from pathlib import Path
           from html import escape
-          import os
           import re
 
           ROOT = Path(".")
           RELEASES = ROOT / "releases"
           INDEX = ROOT / "index.html"
           PEM_FILE = ROOT / "openwrt-daxcore.pem"
-
-          repository = os.environ.get("GITHUB_REPOSITORY", "")
-          owner, _, repo = repository.partition("/")
-          if repo.lower() == f"{owner}.github.io".lower():
-              base_url = f"https://{owner}.github.io"
-          elif owner:
-              base_url = f"https://{owner}.github.io/{repo}"
-          else:
-              base_url = ""
 
           def version_key(version):
               """
@@ -324,7 +282,7 @@ jobs:
           <h1>OpenWrt Feed</h1>
 
           <p class="subtitle">
-              Automatisch generierter Paket-Feed für luci-app-acme
+              Automatisch generierter Paket-Feed
           </p>
           """
           html += """
@@ -333,7 +291,7 @@ jobs:
 
               <p>
                   <strong>Download:</strong>
-                  <a href="openwrt-daxcore.pem">
+                  <a href="/luci-app-acme/openwrt-daxcore.pem">
                       openwrt-daxcore.pem
                   </a>
               </p>
@@ -378,25 +336,20 @@ jobs:
           """
 
               for target, files in targets:
-                  feed_url = (
-                      f"{base_url}/releases/{release}/{target}"
-                      if base_url else f"releases/{release}/{target}"
-                  )
-
                   html += f"""
               <div class="target">
                   <h3>{escape(target)}</h3>
-                  <p><strong>Feed URL:</strong></p>
-                  <pre><code>{escape(feed_url)}</code></pre>
                   <ul>
           """
 
                   for file in files:
                       relative_path = file.as_posix()
 
+                      url = "/luci-app-acme-openwrt/" + relative_path
+
                       html += f"""
                       <li>
-                          <a href="{escape(relative_path)}">
+                          <a href="{escape(url)}">
                               {escape(file.name)}
                           </a>
                       </li>
