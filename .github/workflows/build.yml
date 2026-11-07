@@ -60,6 +60,13 @@ jobs:
           echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
           echo "Built luci-app-acme version: $PKG_VERSION"
 
+      - name: Extract public key from signing key
+        if: env.HAS_SIGNKEY == 'true'
+        env:
+          HAS_SIGNKEY: ${{ secrets.SIGNKEY != '' }}
+        run: |
+          echo "${{ secrets.SIGNKEY }}" | openssl ec -pubout -out openwrt-daxcore.pem
+
       - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
