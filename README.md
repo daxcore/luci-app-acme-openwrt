@@ -1,104 +1,56 @@
 # luci-app-acme-openwrt
 
-Fork von `luci-app-acme` mit Unterstützung für den persistenten
-DNS-Validierungsmodus von acme.sh
+Fork of `luci-app-acme` with support for acme.sh's persistent DNS validation
+mode
 ([draft-ietf-acme-dns-persist-01](https://github.com/acmesh-official/acme.sh/wiki/DNS-persist-mode)).
 
-Das Repository baut ein eigenes apk-Paket und stellt es über GitHub Pages als
-OpenWrt-Feed bereit.
+## Versioning
 
-## Repository-Aufbau
-
-```text
-applications/luci-app-acme/          LuCI-App (Quellcode aus dem LuCI-Feed)
-applications/luci-app-acme/root/      Hilfsskript und ACL für DNS-persist
-.github/workflows/build.yml          Build- und Feed-Workflow
-```
-
-## Versionierung
-
-LuCI-Pakete definieren in der Regel **kein** `PKG_VERSION` in ihrer Makefile.
-Stattdessen berechnet `luci.mk` die Version über `findrev` aus der Git-Historie
-des Paketverzeichnisses. Das Format ist ungefähr:
+LuCI packages usually do **not** define `PKG_VERSION` in their Makefile.
+Instead, `luci.mk` derives the version from the Git history of the package
+directory using `findrev`. The format is roughly:
 
 ```text
-JJ.TTT.SSSSS~commit
+YY.WWW.NNNNN~commit
 ```
 
-Beispiel: `26.311.28144~20e8277`
+Example: `26.311.28144~20e8277`
 
-Der Workflow liest die tatsächlich gebaute Version aus dem Dateinamen des
-apk-Pakets. Dadurch passen Artefaktname, Feed-Index und installierte Version
-immer zusammen. Wichtig:
+The workflow reads the actual built version from the apk filename, so artifact
+names, feed index, and installed version always match. Note:
 
-- Der Checkout erfolgt mit `fetch-depth: 0`, damit `findrev` die komplette
-  Git-Historie sieht und nicht auf `0` zurückfällt.
-- Eine neue Paketversion entsteht durch einen Commit, der das Verzeichnis
-  `applications/luci-app-acme/` ändert. Reine Workflow-Änderungen erzeugen
-  keine neue Paketversion.
-
-## Feed installieren
-
-Voraussetzungen im GitHub-Repository:
-
-- Das Secret **`SIGNKEY`** mit dem privaten Feed-Signaturschlüssel anlegen.
-  Ohne dieses Secret wird der Feed nicht signiert und OpenWrt akzeptiert ihn
-  nicht.
-- Den Workflow einmal ausführen (Push auf `main` oder manuell über
-  **Actions → build → Run workflow**). Dabei wird der Branch `gh-pages`
-  erzeugt.
-- Danach unter **Settings → Pages** als Quelle **Deploy from a branch** und den
-  Branch **`gh-pages`** (Ordner `/`) auswählen.
-
-Der Workflow veröffentlicht nach jedem Build auf dem Branch `gh-pages`:
-
-```text
-https://<user>.github.io/luci-app-acme-openwrt/releases/<release>/<arch>/
-```
-
-Beispiel für OpenWrt 25.12.6 auf `mediatek-filogic`:
-
-```sh
-uclient-fetch -O /etc/apk/keys/openwrt-daxcore.pem \
-  https://<user>.github.io/luci-app-acme-openwrt/openwrt-daxcore.pem
-
-echo 'https://<user>.github.io/luci-app-acme-openwrt/releases/25.12.6/mediatek-filogic' \
-  >> /etc/apk/repositories
-
-apk update
-apk add luci-app-acme
-```
-
-Die genaue Feed-URL steht zusätzlich auf der generierten
-`index.html`-Seite des Feeds.
-
-`apk` wählt bei mehreren Feeds die höchste Paketversion. Die LuCI-Version des
-Forks muss deshalb höher sein als die Version im offiziellen Feed (bei OpenWrt
-25.12.6 ist das `26.304.26398~e969939`). Das ist bei einem Commit nach dem
-Release normalerweise der Fall.
+- The checkout uses `fetch-depth: 0` so `findrev` sees the full Git history and
+  does not fall back to `0`.
+- A new package version is created by a commit that changes the
+  `applications/luci-app-acme/` directory. Workflow-only changes do not produce
+  a new package version.
+- `apk` selects the highest package version when multiple feeds are configured.
+  The fork's LuCI version must therefore be higher than the version in the
+  official feed (for OpenWrt 25.12.6 that is `26.304.26398~e969939`). A commit
+  after the release normally satisfies this.
 
 ## Persistent DNS in LuCI
 
-Im Zertifikatsdialog gibt es die neue Validierungsmethode
-**„DNS-01 Persistent DNS Challenge Validation“** und den Tab
-**„Persistent DNS Challenge Validation“**.
+The certificate dialog provides the new validation method
+**"DNS-01 Persistent DNS Challenge Validation"** and the tab
+**"Persistent DNS Challenge Validation"**.
 
-Dort können eingestellt werden:
+The following options are available:
 
-- **Wildcard and subdomain policy** – erzeugt `policy=wildcard` im TXT-Record.
-  Bei Wildcard-Domains wird dies automatisch aktiviert.
-- **CA identity domain** – optionaler Issuer-Name, z. B. `letsencrypt.org`.
-- **TXT record validity** – optional `persistUntil` in Tagen.
-- **Generate TXT record** – ruft acme.sh mit
-  `--make-dns-persist-value` auf und zeigt Name und Wert des TXT-Records an.
+- **Wildcard and subdomain policy** – generates `policy=wildcard` in the TXT
+  record. It is enabled automatically for wildcard domains.
+- **CA identity domain** – optional issuer name, for example
+  `letsencrypt.org`.
+- **TXT record validity** – optional `persistUntil` in days.
+- **Generate TXT record** – calls acme.sh with `--make-dns-persist-value` and
+  displays the name and value of the TXT record.
 
-Den angezeigten TXT-Record beim DNS-Anbieter anlegen und erst danach das
-Zertifikat ausstellen. Für jede Basisdomain wird ein eigener Record benötigt.
-Mit `policy=wildcard` deckt ein Record auch alle Subdomains ab; ein
-Wildcard-Eintrag `*.example.com` verwendet daher den Record der Basisdomain
-`example.com`.
+Create the displayed TXT record with your DNS provider before issuing the
+certificate. Each base domain needs its own record. With `policy=wildcard`, one
+record also covers all subdomains; a wildcard entry `*.example.com` therefore
+uses the record of the base domain `example.com`.
 
-Beispielhafte UCI-Konfiguration:
+Example UCI configuration:
 
 ```text
 config cert 'example'
