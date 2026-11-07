@@ -1,0 +1,430 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      HAS_SIGNKEY: ${{ secrets.SIGNKEY != '' }}
+
+    strategy:
+      fail-fast: true
+      matrix:
+        release:
+          - 25.12.6
+        arch:
+          - mediatek-filogic
+
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v6
+        with:
+          # LuCI derives the package version from the git history of the
+          # package directory (see findrev in luci.mk). A shallow clone would
+          # make that version fall back to "0".
+          fetch-depth: 0
+
+      - name: Check signing key
+        if: env.HAS_SIGNKEY != 'true'
+        run: |
+          echo "::warning::SIGNKEY is not configured. The feed index will be unsigned and OpenWrt will reject it."
+
+      # The LuCI feed (and therefore luci.mk) comes from the SDK's default
+      # feeds.conf.default; gh-action-sdk runs `feeds update -a` and rewrites
+      # the git.openwrt.org URLs to GitHub. Do not add luci via EXTRA_FEEDS:
+      # that would define the feed twice and scripts/feeds rejects duplicates.
+      - name: Build package for OpenWRT
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}-${{ matrix.release }}
+          PACKAGES: luci-app-acme
+          NO_SHFMT_CHECK: true
+          INDEX: 1
+          PRIVATE_KEY: ${{ secrets.SIGNKEY }}
+          V: w
+
+      # LuCI packages usually do not define PKG_VERSION in their Makefile.
+      # Instead luci.mk computes a date/hash version (findrev). Read the
+      # version from the package that was actually built so artifact names
+      # always match the version in the feed index.
+      - name: Determine built package version
+        id: get_version
+        run: |
+          set -euo pipefail
+          PKG_FILE="$(find bin/packages -type f -path '*/action/luci-app-acme-*.apk' -print -quit)"
+          if [ -z "$PKG_FILE" ]; then
+            echo "::error::No luci-app-acme package found in bin/packages"
+            exit 1
+          fi
+          PKG_BASENAME="$(basename "$PKG_FILE" .apk)"
+          PKG_VERSION="${PKG_BASENAME#luci-app-acme-}"
+          echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Built luci-app-acme version: $PKG_VERSION"
+
+      - name: Extract public key from signing key
+        if: env.HAS_SIGNKEY == 'true'
+        env:
+          SIGNKEY: ${{ secrets.SIGNKEY }}
+        run: |
+          printf '%s\n' "$SIGNKEY" | openssl ec -pubout -out openwrt-daxcore.pem
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: luci-app-acme-${{ steps.get_version.outputs.pkg_version }}-openwrt-${{ matrix.release }}-${{ matrix.arch }}
+          path: |
+            bin/packages/**/action/luci-app-acme*.apk
+            bin/packages/**/action/packages.adb
+            bin/packages/**/action/index.json
+            openwrt-daxcore.pem
+          if-no-files-found: error
+
+      - name: Deploy to GitHub Pages
+        run: |
+          set -euo pipefail
+          DEST="deploy/releases/${{ matrix.release }}/${{ matrix.arch }}"
+          mkdir -p "$DEST"
+          shopt -s globstar nullglob
+          cp bin/packages/**/action/luci-app-acme*.apk "$DEST/"
+          cp bin/packages/**/action/packages.adb "$DEST/"
+          cp bin/packages/**/action/index.json "$DEST/"
+          if [ -f openwrt-daxcore.pem ]; then
+            cp openwrt-daxcore.pem deploy/
+          fi
+
+      - name: Push to Pages Branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          keep_files: true
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+
+  generate-index:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      - name: Generate index.html
+        shell: python
+        run: |
+          from pathlib import Path
+          from html import escape
+          import os
+          import re
+
+          ROOT = Path(".")
+          RELEASES = ROOT / "releases"
+          INDEX = ROOT / "index.html"
+          PEM_FILE = ROOT / "openwrt-daxcore.pem"
+
+          repository = os.environ.get("GITHUB_REPOSITORY", "")
+          owner, _, repo = repository.partition("/")
+          if repo.lower() == f"{owner}.github.io".lower():
+              base_url = f"https://{owner}.github.io"
+          elif owner:
+              base_url = f"https://{owner}.github.io/{repo}"
+          else:
+              base_url = ""
+
+          def version_key(version):
+              """
+              Sortiert OpenWrt-Versionen numerisch absteigend.
+              Beispiel:
+              25.12.5 > 25.12.4 > 25.12.2
+              """
+              parts = re.findall(r"\d+", version)
+              return tuple(int(x) for x in parts)
+
+          releases = []
+
+          if RELEASES.exists():
+              for release_dir in RELEASES.iterdir():
+                  if not release_dir.is_dir():
+                      continue
+
+                  release = release_dir.name
+                  targets = []
+
+                  for target_dir in release_dir.iterdir():
+                      if not target_dir.is_dir():
+                          continue
+
+                      files = sorted(
+                          [
+                              f for f in target_dir.iterdir()
+                              if f.is_file() and f.name != "index.html"
+                          ],
+                          key=lambda f: f.name.lower()
+                      )
+
+                      if files:
+                          targets.append((target_dir.name, files))
+
+                  if targets:
+                      releases.append((release, targets))
+
+          releases.sort(
+              key=lambda x: version_key(x[0]),
+              reverse=True
+          )
+
+          latest_release = releases[0][0] if releases else None
+
+          html = """<!DOCTYPE html>
+          <html lang="de">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+              <title>OpenWrt Feed</title>
+
+              <style>
+                  :root {
+                      color-scheme: light dark;
+                  
+                      --bg: #f5f5f5;
+                      --fg: #222;
+                      --card: #ffffff;
+                      --code-bg: #eeeeee;
+                      --muted: #777;
+                      --link: #0069d9;
+                      --border: #ccc;
+                  }
+                  
+                  @media (prefers-color-scheme: dark) {
+                      :root {
+                          --bg: #111;
+                          --fg: #eee;
+                          --card: #1c1c1c;
+                          --code-bg: #333;
+                          --muted: #999;
+                          --link: #66b3ff;
+                          --border: #444;
+                      }
+                  }
+
+                  body {
+                      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                      max-width: 1100px;
+                      margin: 0 auto;
+                      padding: 30px 20px;
+                      background: var(--bg);
+                      color: var(--fg);
+                  }
+                  
+                  h1 { margin-bottom: 5px; }
+                  
+                  .subtitle {
+                      color: var(--muted);
+                      margin-top: 0;
+                      margin-bottom: 30px;
+                  }
+                  
+                  .release {
+                      background: var(--card);
+                      border-radius: 10px;
+                      padding: 20px 25px;
+                      margin-bottom: 20px;
+                      box-shadow: 0 2px 8px rgba(0,0,0,.08);
+                  }
+                  
+                  .release.latest { border-left: 5px solid #2e7d32; }
+                  
+                  .release-header {
+                      display: flex;
+                      align-items: center;
+                      gap: 10px;
+                      flex-wrap: wrap;
+                  }
+                  
+                  .badge {
+                      display: inline-block;
+                      padding: 3px 8px;
+                      border-radius: 20px;
+                      background: #2e7d32;
+                      color: white;
+                      font-size: 12px;
+                      font-weight: 600;
+                  }
+                  
+                  .target { margin-top: 20px; }
+                  .target h3 { margin-bottom: 8px; }
+                  
+                  ul { margin-top: 5px; padding-left: 25px; }
+                  li { margin: 6px 0; }
+                  
+                  a { color: var(--link); text-decoration: none; }
+                  a:hover { text-decoration: underline; }
+                  
+                  code {
+                      background: var(--code-bg);
+                      padding: 2px 5px;
+                      border-radius: 4px;
+                  }
+                  
+                  pre {
+                      background: var(--code-bg);
+                      padding: 15px;
+                      border-radius: 6px;
+                      overflow-x: auto;
+                      white-space: pre-wrap;
+                      word-break: break-all;
+                      font-size: 13px;
+                      line-height: 1.5;
+                  }
+                  
+                  .key-section { margin-bottom: 30px; }
+                  .key-section h2 { margin-top: 0; }
+                  
+                  footer {
+                      margin-top: 40px;
+                      padding-top: 20px;
+                      border-top: 1px solid var(--border);
+                      color: var(--muted);
+                      font-size: 13px;
+                  }
+
+                  pre code {
+                      background: none;
+                      padding: 0;
+                  }
+              </style>
+          </head>
+
+          <body>
+
+          <h1>OpenWrt Feed</h1>
+
+          <p class="subtitle">
+              Automatisch generierter Paket-Feed für luci-app-acme
+          </p>
+          """
+          html += """
+          <div class="release key-section">
+              <h2>OpenWrt Feed Signing Key</h2>
+
+              <p>
+                  <strong>Download:</strong>
+                  <a href="openwrt-daxcore.pem">
+                      openwrt-daxcore.pem
+                  </a>
+              </p>
+
+              <p>
+                  <strong>Plaintext:</strong>
+              </p>
+
+              <pre><code>"""
+
+          if PEM_FILE.exists():
+              pem_content = PEM_FILE.read_text(encoding="utf-8").strip()
+              html += escape(pem_content)
+          else:
+              html += "openwrt-daxcore.pem nicht gefunden."
+
+          html += """</code></pre>
+          </div>
+          """
+
+          if not releases:
+              html += """
+          <div class="release">
+              <p>Keine Releases gefunden.</p>
+          </div>
+          """
+
+          for release, targets in releases:
+              latest_class = " latest" if release == latest_release else ""
+
+              html += f"""
+          <div class="release{latest_class}">
+              <div class="release-header">
+                  <h2>OpenWrt {escape(release)}</h2>
+          """
+
+              if release == latest_release:
+                  html += '<span class="badge">Latest</span>'
+
+              html += """
+              </div>
+          """
+
+              for target, files in targets:
+                  feed_url = (
+                      f"{base_url}/releases/{release}/{target}"
+                      if base_url else f"releases/{release}/{target}"
+                  )
+
+                  html += f"""
+              <div class="target">
+                  <h3>{escape(target)}</h3>
+                  <p><strong>Feed URL:</strong></p>
+                  <pre><code>{escape(feed_url)}</code></pre>
+                  <ul>
+          """
+
+                  for file in files:
+                      relative_path = file.as_posix()
+
+                      html += f"""
+                      <li>
+                          <a href="{escape(relative_path)}">
+                              {escape(file.name)}
+                          </a>
+                      </li>
+          """
+
+                  html += """
+                  </ul>
+              </div>
+          """
+
+              html += """
+          </div>
+          """
+
+          html += """
+          <footer>
+              Automatically generated by GitHub Actions.
+          </footer>
+
+          </body>
+          </html>
+          """
+
+          INDEX.write_text(
+              html,
+              encoding="utf-8"
+          )
+
+          print(f"Generated {INDEX}")
+          print(f"Releases found: {len(releases)}")
+
+      - name: Commit generated index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add index.html
+
+          if git diff --cached --quiet; then
+            echo "No changes to index.html"
+            exit 0
+          fi
+
+          git commit -m "chore: update generated feed index"
+          git push origin gh-pages
